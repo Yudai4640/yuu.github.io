@@ -162,6 +162,18 @@
                 <div class="text-4xl bg-zinc-800 p-4 rounded cursor-pointer hover:bg-zinc-700" onclick="game.selectPromotion('N')">♘&#xFE0E;</div>
             </div>
         </div>
+
+        <!-- 確認用モーダル -->
+        <div id="confirm-modal" class="w-full flex flex-col items-center" style="display: none;">
+            <div class="bg-[#2a2a2a] p-6 rounded-lg shadow-xl text-center max-w-[300px] w-full border border-zinc-700">
+                <h2 id="confirm-title" class="text-xl font-bold mb-4">確認</h2>
+                <p id="confirm-message" class="mb-6 opacity-80 text-sm">本当に実行しますか？</p>
+                <div class="flex gap-3 justify-center">
+                    <button id="confirm-yes" class="bg-blue-600 hover:bg-blue-500 py-2 px-4 rounded font-bold transition-colors flex-1">はい</button>
+                    <button id="confirm-no" class="bg-zinc-600 hover:bg-zinc-500 py-2 px-4 rounded font-bold transition-colors flex-1">いいえ</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Advantage Meter -->
@@ -191,8 +203,8 @@
 
     <div class="mt-3 flex flex-col items-center gap-2 w-full max-w-[400px]">
         <div class="flex w-full gap-2">
-            <button class="flex-1 bg-zinc-700 py-3 rounded font-bold hover:bg-zinc-600 transition-colors" onclick="game.undoMove()">1手戻る</button>
-            <button class="flex-1 bg-red-900 py-3 rounded font-bold hover:bg-red-800 transition-colors" onclick="game.showModeSelection()">終了</button>
+            <button class="flex-1 bg-zinc-700 py-3 rounded font-bold hover:bg-zinc-600 transition-colors" onclick="game.confirmUndo()">1手戻る</button>
+            <button class="flex-1 bg-red-900 py-3 rounded font-bold hover:bg-red-800 transition-colors" onclick="game.confirmExit()">終了</button>
         </div>
         <label class="flex w-full items-center justify-center gap-2 cursor-pointer bg-zinc-800 py-2 px-1 rounded border border-zinc-700 hover:bg-zinc-700 transition-colors">
             <input type="checkbox" id="assist-mode-toggle" class="w-5 h-5 accent-blue-500" onchange="game.toggleAssistMode(this.checked)">
@@ -222,10 +234,72 @@
         // AI評価用（Kには仮想的な高値を設定）
         const AI_VALUES = { ...MATERIAL_VALUES, 'k': 900, 'K': 900 };
 
+        // 効果音管理クラス（Web Audio APIを使用）
+        class SoundEffects {
+            constructor() {
+                this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            resume() {
+                if(this.ctx.state === 'suspended') this.ctx.resume();
+            }
+            playTone(freq, type, duration, vol=0.1) {
+                this.resume();
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+                gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + duration);
+            }
+            buttonClick() { this.playTone(600, 'sine', 0.1, 0.05); }
+            pieceSelect() { this.playTone(400, 'triangle', 0.1, 0.05); }
+            pieceMove()   { this.playTone(200, 'sine', 0.15, 0.1); }
+            pieceCapture(){
+                this.resume();
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(800, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(200, this.ctx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.1);
+            }
+            countdown() { this.playTone(800, 'sine', 0.1, 0.05); }
+            check() {
+                this.resume();
+                this.playTone(880, 'sine', 0.2, 0.1);
+                setTimeout(() => this.playTone(880, 'sine', 0.3, 0.1), 100);
+            }
+            checkmate() {
+                this.resume();
+                [440, 554.37, 659.25, 880].forEach(f => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'triangle';
+                    osc.frequency.value = f;
+                    gain.gain.setValueAtTime(0.2, this.ctx.currentTime);
+                    gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 2.0);
+                    osc.connect(gain);
+                    gain.connect(this.ctx.destination);
+                    osc.start();
+                    osc.stop(this.ctx.currentTime + 2.0);
+                });
+            }
+        }
+
         class ChessGame {
             constructor(canvasId) {
                 this.canvas = document.getElementById(canvasId);
                 this.ctx = this.canvas.getContext('2d');
+                this.sfx = new SoundEffects();
                 this.initialized = false;
                 this.board = [];
                 this.turn = 'white';
@@ -257,6 +331,7 @@
             }
 
             showModeSelection() {
+                this.sfx.buttonClick();
                 this.stopTimer();
                 this.hideAllOverlays();
                 document.getElementById('mode-selection').style.display = 'flex';
@@ -267,11 +342,13 @@
             }
 
             showCpuConfig() {
+                this.sfx.buttonClick();
                 this.hideAllOverlays();
                 document.getElementById('cpu-config').style.display = 'flex';
             }
 
             showTimeSelection(mode, level = 1) {
+                this.sfx.buttonClick();
                 this.tempMode = mode;
                 this.tempLevel = parseInt(level);
                 this.hideAllOverlays();
@@ -279,11 +356,55 @@
             }
 
             hideAllOverlays() {
-                const ids = ['mode-selection', 'cpu-config', 'time-selection', 'promotion-modal'];
+                const ids = ['mode-selection', 'cpu-config', 'time-selection', 'promotion-modal', 'confirm-modal'];
                 ids.forEach(id => document.getElementById(id).style.display = 'none');
             }
 
+            confirmUndo() {
+                this.sfx.buttonClick();
+                if (this.history.length === 0 || this.animatingPiece) return;
+                this.showConfirm("1手戻る", "1手前の状態に戻しますか？", () => {
+                    this.undoMove();
+                });
+            }
+
+            confirmExit() {
+                this.sfx.buttonClick();
+                this.showConfirm("終了確認", "現在のゲームを終了してタイトルに戻りますか？", () => {
+                    this.showModeSelection();
+                });
+            }
+
+            showConfirm(title, message, callback) {
+                const modal = document.getElementById('confirm-modal');
+                document.getElementById('confirm-title').innerText = title;
+                document.getElementById('confirm-message').innerText = message;
+                
+                const yesBtn = document.getElementById('confirm-yes');
+                const noBtn = document.getElementById('confirm-no');
+
+                // イベントの重複登録を防ぐためにノードをクローンして置き換え
+                const newYes = yesBtn.cloneNode(true);
+                const newNo = noBtn.cloneNode(true);
+                yesBtn.parentNode.replaceChild(newYes, yesBtn);
+                noBtn.parentNode.replaceChild(newNo, noBtn);
+
+                newYes.addEventListener('click', () => {
+                    this.sfx.buttonClick();
+                    modal.style.display = 'none';
+                    callback();
+                });
+
+                newNo.addEventListener('click', () => {
+                    this.sfx.buttonClick();
+                    modal.style.display = 'none';
+                });
+
+                modal.style.display = 'flex';
+            }
+
             startWithTime(seconds, inc) {
+                this.sfx.buttonClick();
                 this.gameMode = this.tempMode;
                 this.aiLevel = this.tempLevel;
                 this.timers = { white: seconds, black: seconds };
@@ -358,9 +479,29 @@
 
             startTimer() {
                 this.stopTimer();
+                let lastTurn = this.turn;
+                let lastSec = Math.floor(this.timers[this.turn]);
+
                 this.timerInterval = setInterval(() => {
+                    // 手番が切り替わった場合、前回の秒数状態をリセット
+                    if (lastTurn !== this.turn) {
+                        lastTurn = this.turn;
+                        lastSec = Math.floor(this.timers[this.turn]);
+                    }
+
                     this.timers[this.turn] -= 0.1;
-                    if (this.timers[this.turn] <= 0) { this.timers[this.turn] = 0; this.handleTimeout(); }
+                    const currentSec = Math.floor(this.timers[this.turn]);
+
+                    // 残り時間が10秒未満になり、かつ「秒」の桁が変わるごとにカウントダウン音を鳴らす
+                    if (currentSec < 10 && currentSec >= 0 && currentSec !== lastSec) {
+                        this.sfx.countdown();
+                    }
+                    lastSec = currentSec;
+
+                    if (this.timers[this.turn] <= 0) { 
+                        this.timers[this.turn] = 0; 
+                        this.handleTimeout(); 
+                    }
                     this.updateTimerDisplay();
                 }, 100);
             }
@@ -370,6 +511,7 @@
             handleTimeout() {
                 this.stopTimer();
                 this.isGameOver = true;
+                this.sfx.checkmate(); // メイト時と同じ効果音
                 this.updateStatus(`時間切れ！ ${this.turn === 'white' ? '黒' : '白'}の勝ち`);
             }
 
@@ -434,6 +576,7 @@
                 if (p && (this.turn === 'white' ? p === p.toUpperCase() : p === p.toLowerCase())) {
                     this.selected = { x, y };
                     this.validMoves = this.getMoves(x, y, this.board);
+                    this.sfx.pieceSelect(); // 駒を選択した時の音
                 } else { 
                     this.selected = null; 
                 }
@@ -457,6 +600,7 @@
                 if (this.useTimer) this.timers[this.turn] += this.increment;
                 
                 const piece = this.animatingPiece.piece;
+                const isCapture = this.board[move.to.y][move.to.x] !== null; // キャプチャ判定
                 
                 if (move.isCastling) {
                     const rookY = move.from.y;
@@ -478,6 +622,12 @@
                 this.lastMove = move;
                 this.animatingPiece = null;
                 
+                if (isCapture) {
+                    this.sfx.pieceCapture(); // 取った時の音
+                } else {
+                    this.sfx.pieceMove(); // 置いた時の音
+                }
+                
                 this.updateAdvantageMeter();
 
                 if ((piece === 'P' && move.to.y === 0) || (piece === 'p' && move.to.y === 7)) {
@@ -493,6 +643,7 @@
             }
 
             selectPromotion(char) {
+                this.sfx.buttonClick();
                 const p = this.turn === 'white' ? char.toUpperCase() : char.toLowerCase();
                 this.board[this.pendingPromotion.to.y][this.pendingPromotion.to.x] = p;
                 document.getElementById('promotion-modal').style.display = 'none';
@@ -502,6 +653,7 @@
             }
 
             toggleAssistMode(checked) {
+                this.sfx.buttonClick();
                 this.isAssistMode = checked;
                 if (this.isAssistMode) {
                     this.updateAssistMoves();
@@ -668,9 +820,12 @@
                 this.updateCheckStatus();
 
                 if (this.isMate()) {
+                    this.sfx.checkmate(); // メイト時の音
                     this.isGameOver = true; this.stopTimer();
                     this.updateStatus(`チェックメイト！ ${this.turn === 'white' ? '黒' : '白'}の勝ち`);
                 } else {
+                    if (this.inCheckPos) this.sfx.check(); // チェック時の音
+                    
                     const checkStr = this.inCheckPos ? "⚠️ チェック！ " : "";
                     this.updateStatus(checkStr + (this.turn === 'white' ? "白の番です" : "黒の番です"));
                     if (this.gameMode === 'cpu' && this.turn !== this.playerColor) {
